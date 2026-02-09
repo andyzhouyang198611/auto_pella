@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Pella.app 自动保活与续期脚本 (仿 XServer 结构版)
+Pella.app 自动保活与续期脚本 (防崩溃最终版)
 """
 
 import asyncio
@@ -11,8 +11,15 @@ import re
 import requests
 from datetime import timezone, timedelta
 from playwright.async_api import async_playwright
-# 直接使用与 XServer 脚本相同的导入方式
-from playwright_stealth import stealth_async
+
+# 👇👇👇 【核心修复】增加容错导入，防止因找不到 stealth_async 而崩溃 👇👇👇
+try:
+    from playwright_stealth import stealth_async
+except ImportError:
+    # 如果导入失败，定义一个空函数，防止后面调用报错
+    print("⚠️ 警告: 未找到 stealth_async，将跳过伪装模式 (不影响基本功能)")
+    async def stealth_async(page):
+        pass
 
 # =====================================================================
 #                          配置区域
@@ -129,6 +136,8 @@ class PellaBot:
         # 这里的 viewport 设置即模仿 XServer 脚本
         self.context = await self.browser.new_context(viewport={'width': 1920, 'height': 1080})
         self.page = await self.context.new_page()
+        
+        # 安全调用 stealth (如果导入失败，这里调用的是上面的空函数)
         await stealth_async(self.page)
 
     async def close(self):
