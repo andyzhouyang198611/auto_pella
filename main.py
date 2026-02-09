@@ -11,9 +11,10 @@ from pyvirtualdisplay import Display
 # ================= 配置区域 =================
 ENV_VAR_NAME = "PELLA_BATCH"
 LOGIN_URL = "https://www.pella.app/login"
-SERVER_URL_TEMPLATE = "https://www.pella.app/server/{server_id}"
+# 注意：这里保持模板，具体ID由环境变量传入，或者您可以临时硬编码调试
+SERVER_URL_TEMPLATE = "https://www.pella.app/server/{server_id}" 
 
-# ================= 辅助函数 =================
+# ... (辅助函数 setup_xvfb, mask_email, get_beijing_time, send_telegram 保持不变) ...
 def setup_xvfb():
     if platform.system().lower() == "linux" and not os.environ.get("DISPLAY"):
         display = Display(visible=False, size=(1920, 1080))
@@ -43,7 +44,9 @@ def send_telegram(token, chat_id, message):
 
 # ================= 核心逻辑 =================
 def run_pella_task(account_line):
-    os.makedirs("screenshots", exist_ok=True)
+    # 确保保存截图的文件夹存在
+    os.makedirs("debug_screenshots", exist_ok=True)
+    
     parts = [p.strip() for p in account_line.split(",")]
     if len(parts) < 3: return
 
@@ -77,11 +80,32 @@ def run_pella_task(account_line):
             print("✅ 登录成功")
 
             # --- 2. 进入服务器 ---
+            # 如果您想强制进入特定 URL 截图，可以直接修改这里，或者确保环境变量里的 server_id 是对的
+            # target_url = "https://www.pella.app/server/ede5a65efe6644549de444a2cf46dbe0" 
             target_url = SERVER_URL_TEMPLATE.format(server_id=server_id)
+            
+            print(f"👉 跳转服务器: {target_url}")
             sb.open(target_url)
-            sb.sleep(8) 
+            sb.sleep(10) # 等待完全加载
 
-            # --- 3. 获取信息 ---
+            # ===============================================
+            # 📸 截图并保存 HTML (新增部分)
+            # ===============================================
+            print("📸 正在截图...")
+            # 使用时间戳防止文件名冲突
+            ts = int(time.time())
+            screenshot_name = f"debug_screenshots/page_{server_id}_{ts}.png"
+            sb.save_screenshot(screenshot_name)
+            
+            # 保存 HTML 源码以便查看元素结构
+            html_name = f"debug_screenshots/source_{server_id}_{ts}.html"
+            with open(html_name, "w", encoding="utf-8") as f:
+                f.write(sb.get_page_source())
+            
+            print(f"✅ 截图已保存: {screenshot_name}")
+            log["logs"].append("已执行截图")
+
+            # --- 3. 获取信息 (保持原有逻辑) ---
             try:
                 txt = sb.get_text("body")
                 # IP
@@ -96,10 +120,17 @@ def run_pella_task(account_line):
             if "D" in log["expiry"]: log["hint"] = "剩余 > 24小时"
             else: log["hint"] = "⚠️ 剩余 < 24小时"
 
+            # ... (后续的视觉扫描和续期逻辑保持不变) ...
+            
+            # (为了节省篇幅，后续代码省略，请保持您原有代码的后续部分)
+            # 只要确保上面的截图代码块添加了即可
+
             # ===============================================
             # 🔍 视觉暴力搜索 (不依赖文字，依赖颜色和特征)
             # ===============================================
             print("👉 开始视觉扫描按钮...")
+            
+            # ... (保持原有代码不变) ...
             
             # 获取所有可能是按钮的元素 (button, a, div)
             candidates = sb.find_elements("button") + sb.find_elements("a.btn") + sb.find_elements("div[role='button']")
@@ -119,9 +150,7 @@ def run_pella_task(account_line):
                         stop_btn = el
                     
                     # 2. 识别 START (绿色按钮)
-                    # Pella 的绿色按钮通常有 bg-green-500 或 bg-emerald-500
                     if "start" in text or "bg-green" in html or "bg-emerald" in html:
-                        # 排除掉 "Restart" 按钮
                         if "RESTART" not in text:
                             start_btn = el
                     
@@ -132,35 +161,27 @@ def run_pella_task(account_line):
                 except: pass
 
             # --- 逻辑判断 ---
-            
-            # 场景 A: 已经在运行
             if stop_btn:
                 print("✅ 发现红色按钮 -> 状态: 运行中")
                 log["status"] = "运行中"
-            
-            # 场景 B: 已停止，需要启动
             elif start_btn:
                 print("⚠️ 发现绿色按钮 -> 状态: 已停止")
                 log["status"] = "已停止"
-                
                 print("👉 执行 JS 强力点击启动...")
                 sb.execute_script("arguments[0].click();", start_btn)
                 sb.sleep(5)
-                
-                # 检查是否成功
+                # ... 检查结果 ...
                 logs = sb.get_text("body")[-1000:]
                 if "Starting" in logs or "Booting" in logs:
                     log["status"] = "启动指令已发"
                     log["logs"].append("已触发启动")
                 else:
-                    # 刷新再看一眼
                     sb.refresh()
                     sb.sleep(5)
                     if sb.is_element_visible("button:contains('STOP')") or sb.is_element_visible(".bg-red-500"):
                         log["status"] = "启动成功"
                     else:
                         log["logs"].append("点击后状态未变")
-
             else:
                 log["status"] = "未找到控制按钮"
                 log["logs"].append("按钮定位失败")
@@ -169,7 +190,6 @@ def run_pella_task(account_line):
             print(f"👉 发现 {len(claim_btns)} 个续期相关元素")
             clicked_cnt = 0
             claimed_cnt = 0
-            
             for btn in claim_btns:
                 try:
                     t = btn.text.upper()
@@ -190,25 +210,24 @@ def run_pella_task(account_line):
             print(f"❌ 错误: {e}")
             log["logs"].append(f"Err: {str(e)[:30]}")
             ts = int(time.time())
-            sb.save_screenshot(f"screenshots/err_{ts}.png")
+            # 错误时也截图
+            sb.save_screenshot(f"debug_screenshots/err_{ts}.png")
         finally:
             send_report(log, tg_token, tg_chat_id)
 
+# ... (辅助函数 send_report 和 main 入口保持不变) ...
 def send_report(log, token, chat_id):
     header = "ℹ️"
     if "启动" in "".join(log["logs"]): header = "⚠️"
     if "成功续期" in log["renew_status"]: header = "🎉"
-    
     act = "无需续期"
     if "启动" in "".join(log["logs"]): act = "执行了启动操作"
     elif "成功续期" in log["renew_status"]: act = log["renew_status"]
-
     msg = f"""
 <b>🎮 Pella 续期通知</b>
 🆔 账号: <code>{log['account']}</code>
 🖥 IP: <code>{log['ip']}</code>
 ⏰ 时间: {get_beijing_time()}
-
 {header} <b>{act}</b>
 📊 状态: <b>{log['status']}</b>
 ⏳ 剩余: {log['expiry']}
