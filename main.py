@@ -47,6 +47,9 @@ def send_telegram(token, chat_id, message):
 # ================= 核心逻辑 =================
 
 def run_pella_task(account_line):
+    # 确保截图目录存在
+    os.makedirs("screenshots", exist_ok=True)
+
     parts = [p.strip() for p in account_line.split(",")]
     if len(parts) < 3:
         print(f"❌ 账号格式错误: {account_line}")
@@ -73,25 +76,16 @@ def run_pella_task(account_line):
             print("👉 打开登录页面...")
             sb.uc_open_with_reconnect(LOGIN_URL, 6)
             
-            # --- 关键修复: 尝试过 Cloudflare 验证 ---
-            print("👉 检查是否有验证码...")
-            try:
-                # 尝试点击 Cloudflare 验证框（如果有）
-                sb.uc_gui_click_captcha() 
-                sb.sleep(3)
-            except:
-                pass
+            # 尝试过盾
+            try: sb.uc_gui_click_captcha(); sb.sleep(2)
+            except: pass
 
             # --- 步骤 1: 输入邮箱 ---
             print("👉 等待邮箱输入框...")
-            
-            # 使用更通用的选择器：匹配 placeholder 文本
-            # 你的截图中 placeholder 是 "Enter your email address"
             email_selectors = [
-                'input[placeholder*="email address"]',  # 优先尝试 Placeholder
-                'input[name="identifier"]',             # 其次尝试 name
-                'input[type="email"]',                  # 再次尝试 type
-                'label:contains("Email") + input'       # 尝试 Label 关联
+                'input[placeholder*="email address"]',
+                'input[name="identifier"]',
+                'input[type="email"]'
             ]
             
             email_input = None
@@ -101,26 +95,42 @@ def run_pella_task(account_line):
                     break
             
             if not email_input:
-                # 如果找不到，尝试 Shadow DOM 查找（针对 Clerk）
-                print("⚠️ 常规选择器失败，尝试 Shadow DOM...")
-                try:
-                    sb.type('::shadow input[name="identifier"]', email)
-                    print("✅ Shadow DOM 输入成功")
-                    email_input = "shadow" # 标记已输入
-                except:
-                    raise Exception("无法找到邮箱输入框，可能被 Cloudflare 拦截")
+                # 截图并报错
+                sb.save_screenshot(f"screenshots/error_no_email_input.png")
+                raise Exception("未找到邮箱输入框")
             
-            if email_input and email_input != "shadow":
-                print(f"👉 发现输入框 ({email_input})，输入邮箱...")
-                sb.type(email_input, email)
-
+            print(f"👉 发现输入框 ({email_input})，输入邮箱...")
+            sb.type(email_input, email)
             sb.sleep(1)
-            print("👉 点击 Continue...")
-            sb.click('button:contains("Continue")')
             
+            print("👉 点击 Continue...")
+            # 尝试点击，如果使用的是 form 提交，有时候需要点击 type=submit
+            continue_btn = 'button:contains("Continue")'
+            sb.click(continue_btn)
+            
+            # --- 关键修复: 等待密码框或错误提示 ---
+            print("👉 等待跳转 (检查密码框或验证码)...")
+            
+            # 循环检查 5 次 (共10秒)，看是否卡在这一步
+            for i in range(5):
+                sb.sleep(2)
+                # 1. 检查密码框出来了没
+                if sb.is_element_visible('input[type="password"]'):
+                    break
+                
+                # 2. 检查是否有 Turnstile 验证码挡路
+                if sb.is_element_visible('iframe[src*="challenges"]'):
+                    print("⚠️ 检测到验证码，尝试点击...")
+                    sb.uc_gui_click_captcha()
+                
+                # 3. 检查是否还在邮箱页 (可能点击没生效)
+                if sb.is_element_visible(continue_btn):
+                    print(f"⚠️ 仍在邮箱页 (第 {i+1} 次尝试)，重试点击 Continue...")
+                    sb.click(continue_btn)
+
             # --- 步骤 2: 输入密码 ---
-            print("👉 等待密码输入框...")
-            sb.wait_for_element('input[type="password"]', timeout=20)
+            print("👉 确认密码输入框可见...")
+            sb.wait_for_element('input[type="password"]', timeout=15)
             
             print("👉 输入密码...")
             sb.type('input[type="password"]', password)
@@ -138,9 +148,8 @@ def run_pella_task(account_line):
             target_url = SERVER_URL_TEMPLATE.format(server_id=server_id)
             print(f"👉 进入服务器页面: {target_url}")
             sb.open(target_url)
-            sb.sleep(8) # Pella 页面加载较慢，给足时间
+            sb.sleep(8) 
 
-            # 3. 抓取信息与操作 (与之前保持一致)
             # 获取 IP
             try:
                 body_text = sb.get_text("body")
@@ -194,9 +203,17 @@ def run_pella_task(account_line):
             print(f"❌ 错误: {e}")
             log_info["status"] = "执行出错"
             log_info["actions"].append(f"Err: {str(e)[:40]}")
-            # 截图
-            try: sb.save_screenshot("error_page.png") 
-            except: pass
+            
+            # ======= 📸 截图保存逻辑 =======
+            ts = int(time.time())
+            safe_email = email.split('@')[0]
+            screen_path = f"screenshots/error_{safe_email}_{ts}.png"
+            try:
+                sb.save_screenshot(screen_path)
+                print(f"📸 错误截图已保存: {screen_path}")
+            except Exception as s_e:
+                print(f"⚠️ 截图保存失败: {s_e}")
+            # ==============================
         
         finally:
             send_report(log_info, tg_token, tg_chat_id)
@@ -204,6 +221,7 @@ def run_pella_task(account_line):
 def send_report(info, token, chat_id):
     action_str = " | ".join(info["actions"])
     header_emoji = "⚠️" if "启动" in action_str else ("🎉" if "续期" in action_str else "ℹ️")
+    if "Err" in action_str: header_emoji = "❌"
     
     msg = f"""
 <b>🎮 Pella 续期通知</b>
