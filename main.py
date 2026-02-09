@@ -43,6 +43,9 @@ def send_telegram(token, chat_id, message):
 
 # ================= 核心逻辑 =================
 def run_pella_task(account_line):
+    # 1. 🟢 修复核心：确保文件夹存在
+    os.makedirs("debug_screenshots", exist_ok=True)
+    
     parts = [p.strip() for p in account_line.split(",")]
     if len(parts) < 3: return
 
@@ -58,7 +61,7 @@ def run_pella_task(account_line):
 
     with SB(uc=True, test=True, locale="en") as sb:
         try:
-            # --- 1. 登录 (保持不变) ---
+            # --- 登录 ---
             print("👉 登录...")
             sb.uc_open_with_reconnect(LOGIN_URL, 6)
             try: sb.uc_gui_click_captcha(); sb.sleep(2)
@@ -75,19 +78,23 @@ def run_pella_task(account_line):
             sb.wait_for_element('a[href*="/server/"]', timeout=30)
             print("✅ 登录成功")
 
-            # --- 2. 进入服务器 ---
+            # --- 进入服务器 ---
             target_url = SERVER_URL_TEMPLATE.format(server_id=server_id)
             print(f"👉 跳转: {target_url}")
             sb.open(target_url)
-            sb.sleep(8) 
+            sb.sleep(10) # 等待完全加载
 
-            # --- 3. 获取信息 ---
+            # 2. 🟢 修复核心：进入页面后立即截图留底
+            ts = int(time.time())
+            sb.save_screenshot(f"debug_screenshots/status_{ts}.png")
+            print("📸 已保存状态截图")
+
+            # --- 获取信息 ---
             try:
                 txt = sb.get_text("body")
                 ips = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', txt)
                 valid = [i for i in ips if not i.startswith("127.") and "0.0.0.0" not in i]
                 log["ip"] = valid[0] if valid else ("0.0.0.0" if "0.0.0.0" in txt else "ID: "+server_id[:6])
-                
                 match = re.search(r"expires in\s+([0-9D\sHM]+)", txt)
                 log["expiry"] = match.group(1).strip() if match else "Error"
             except: pass
@@ -95,83 +102,68 @@ def run_pella_task(account_line):
             if "D" in log["expiry"]: log["hint"] = "剩余 > 24小时"
             else: log["hint"] = "⚠️ 剩余 < 24小时"
 
-            # ===============================================
-            # ⚡️ 核心修复：精准定位 START/STOP 按钮
-            # ===============================================
+            # --- 状态检查与启动 (使用 bg-brand-green) ---
+            print("👉 检查状态...")
             
-            # 定义精准的选择器 (基于你提供的源码)
-            # STOP 按钮通常是红色的 bg-brand-red 或包含 STOP 文字
-            STOP_SELECTOR = "button:contains('STOP')"
-            # START 按钮类名包含 bg-brand-green
+            # 精准选择器
             START_SELECTOR = "button.bg-brand-green" 
+            STOP_SELECTOR = "button:contains('STOP')"
 
-            print("👉 检查服务器状态...")
-            
-            # 1. 优先检查是否正在运行 (STOP 按钮存在)
             if sb.is_element_visible(STOP_SELECTOR):
-                print("✅ 状态: 运行中 (找到 STOP 按钮)")
+                print("✅ 状态: 运行中")
                 log["status"] = "运行中"
             
-            # 2. 检查是否需要启动 (START 按钮存在)
             elif sb.is_element_visible(START_SELECTOR):
-                print("⚠️ 状态: 已停止 (找到 START 按钮)")
+                print("⚠️ 状态: 已停止，尝试启动...")
                 log["status"] = "已停止"
                 
-                print("👉 执行启动操作...")
-                # 获取按钮元素
-                start_btn = sb.find_element(START_SELECTOR)
-                
-                # 使用 JS 点击 (最稳妥)
-                sb.execute_script("arguments[0].click();", start_btn)
+                # 获取并点击
+                btn = sb.find_element(START_SELECTOR)
+                sb.execute_script("arguments[0].click();", btn)
                 sb.sleep(2)
                 
-                # 二次确认：有时点击没反应，再点一次
+                # 再次确认点击
                 if sb.is_element_visible(START_SELECTOR):
-                    print("👉 再次尝试点击...")
                     sb.click(START_SELECTOR)
                 
                 sb.sleep(5)
                 
-                # 检查控制台日志 (源码显示 console 在 pre 标签里)
+                # 检查 Console 
                 console_text = sb.get_text("pre")
-                if "Starting" in console_text or "Booting" in console_text:
+                if "Starting" in console_text:
                     log["status"] = "启动指令已发"
                     log["logs"].append("已触发启动")
                 else:
-                    # 刷新页面看状态变了没
                     sb.refresh()
                     sb.sleep(5)
                     if sb.is_element_visible(STOP_SELECTOR):
                         log["status"] = "启动成功"
                     else:
-                        log["logs"].append("点击后无反应")
+                        log["logs"].append("启动无反应")
+                        # 启动失败截图
+                        sb.save_screenshot(f"debug_screenshots/failed_start_{ts}.png")
             else:
-                # 兜底逻辑：如果在源码里找不到特定 class，尝试找文字
-                print("⚠️ 未找到标准按钮，尝试文字匹配...")
+                # 兜底
                 if sb.is_element_visible("//button[contains(., 'START')]"):
                     sb.execute_script("arguments[0].click();", sb.find_element("//button[contains(., 'START')]"))
-                    log["logs"].append("触发备用启动")
-                    log["status"] = "尝试启动(备用)"
+                    log["status"] = "备用启动触发"
                 else:
-                    log["status"] = "按钮定位失败"
+                    log["status"] = "按钮未找到"
 
-            # --- 续期处理 (根据源码优化) ---
+            # --- 续期 ---
             print("👉 检查续期...")
-            # 源码显示 Claim 按钮可能是 <a> 标签且包含 'Claim'
-            # <a ...>Claimed...</a>
-            # 我们查找所有包含 Claim 文本的 <a> 或 <button>
-            
-            claim_candidates = sb.find_elements("a:contains('Claim')") + sb.find_elements("button:contains('Claim')")
+            # 查找 button 和 a 标签
+            candidates = sb.find_elements("button") + sb.find_elements("a")
             
             clicked_cnt = 0
             claimed_cnt = 0
             
-            for el in claim_candidates:
+            for el in candidates:
                 try:
                     txt = el.text
                     if "Claimed" in txt:
                         claimed_cnt += 1
-                    elif "Claim" in txt: # 未领取的按钮
+                    elif "Claim" in txt and "Claimed" not in txt:
                         print(f"👉 点击续期: {txt}")
                         sb.execute_script("arguments[0].click();", el)
                         clicked_cnt += 1
@@ -185,6 +177,10 @@ def run_pella_task(account_line):
         except Exception as e:
             print(f"❌ 错误: {e}")
             log["logs"].append(f"Err: {str(e)[:30]}")
+            # 3. 🟢 修复核心：出错时必须截图
+            ts = int(time.time())
+            sb.save_screenshot(f"debug_screenshots/error_{ts}.png")
+        
         finally:
             send_report(log, tg_token, tg_chat_id)
 
