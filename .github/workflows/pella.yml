@@ -1,94 +1,53 @@
-name: 🟣 Pella.app 自动保活续期
+name: Pella Auto KeepAlive
 
 on:
   schedule:
-    # 每天北京时间 09:30 和 23:30 (UTC 01:30, 15:30)
-    - cron: '30 1 * * *'
-    - cron: '30 15 * * *'
+    # 北京时间 08:30 (UTC 00:30)
+    - cron: "30 0 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  pella_run:
+  pella_renew:
     runs-on: ubuntu-latest
-    
-    # 👇 必须添加这个权限，否则无法提交 time.txt
-    permissions:
-      contents: write
+    timeout-minutes: 15
 
     steps:
-      - name: 检出代码
+      - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      - name: 设置 Python
+      - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.10"
 
-      - name: 缓存依赖
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.cache/ms-playwright
-          key: ${{ runner.os }}-pip-pella-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-pella-
-
-      - name: 安装依赖
+      - name: 📦 Install Dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
           pip install -r requirements.txt
-          python -m playwright install chromium
 
-      - name: 运行 Pella 脚本
+      - name: 🚀 Run Pella Script
         env:
-          # 必须在 Secrets 中设置这些变量
-          PELLA_EMAIL: ${{ secrets.PELLA_EMAIL }}
-          PELLA_PASSWORD: ${{ secrets.PELLA_PASSWORD }}
-          PELLA_SERVER_ID: ${{ secrets.PELLA_SERVER_ID }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # 强制无头模式
-          USE_HEADLESS: "true"
+          # 格式: email,password,server_id,tg_token,tg_chat_id
+          PELLA_BATCH: ${{ secrets.PELLA_BATCH }}
         run: python main.py
 
-      # 👇👇👇 新增: 提交 time.txt 保活步骤 (含重试机制) 👇👇👇
-      - name: Commit time.txt (防止60天暂停)
+      # ⏱️ 自动提交防止 Actions 暂停 (抄作业部分)
+      - name: Keep Workflow Alive
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # 写入当前时间
-          echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
-
-          git add time.txt
-
-          # 检查是否有变化
-          if git diff --cached --quiet; then
-            echo "无变化，跳过提交"
-          else
-            git commit -m "⏱️ Pella保活: $(date +'%Y-%m-%d %H:%M:%S')"
-            
-            # 重试机制 (防止 GitHub 服务器波动)
-            MAX_RETRIES=3
-            count=0
-            success=false
-            while [ $count -lt $MAX_RETRIES ]; do
-              if git push origin HEAD:main; then
-                echo "✅ 推送成功"
-                success=true
-                break
-              else
-                echo "⚠️ 推送失败，5秒后重试 ($((count+1))/$MAX_RETRIES)..."
-                sleep 5
-                git pull --rebase origin main
-                count=$((count+1))
-              fi
-            done
-
-            if [ "$success" = false ]; then
-              echo "❌ 多次重试后仍失败"
-              exit 1
-            fi
+          
+          if [ ! -f time.txt ]; then
+            echo "init" > time.txt
           fi
+          echo "$(date)" > time.txt
+          
+          git add time.txt
+          git commit -m "⏱️ Daily Keepalive" || echo "No changes"
+          git push
