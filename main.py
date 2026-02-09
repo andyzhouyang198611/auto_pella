@@ -61,7 +61,7 @@ def run_pella_task(account_line):
         "ip": "Unknown",
         "status": "Unknown",
         "expiry": "Unknown",
-        "renew_status": "Unknown",
+        "renew_status": "无需续期", # 默认为无需
         "hint": "",
         "logs": []
     }
@@ -74,37 +74,33 @@ def run_pella_task(account_line):
             print("👉 进入登录页...")
             sb.uc_open_with_reconnect(LOGIN_URL, 6)
             
-            # 过盾尝试
             try: sb.uc_gui_click_captcha(); sb.sleep(2)
             except: pass
 
             # === 输入邮箱 ===
             print("👉 输入邮箱...")
-            # 兼容多种邮箱框定位
-            email_input = None
-            for sel in ['input[name="identifier"]', 'input[type="email"]', 'input[name="email"]']:
-                if sb.is_element_visible(sel):
-                    email_input = sel
-                    break
+            if not sb.is_element_visible('input[name="identifier"]'):
+                # 备用选择器
+                if sb.is_element_visible('input[type="email"]'):
+                     sb.type('input[type="email"]', email + "\n")
+                else:
+                     raise Exception("找不到邮箱框")
+            else:
+                sb.type('input[name="identifier"]', email + "\n")
             
-            if not email_input: raise Exception("找不到邮箱输入框")
-            
-            sb.type(email_input, email + "\n") # 回车提交
             sb.sleep(5) 
 
             # === 输入密码 ===
             print("👉 输入密码...")
-            # 尝试定位密码框，如果还在邮箱页则补点Continue
             if not sb.is_element_visible('input[name="password"]'):
                 if sb.is_element_visible('button:contains("Continue")'):
                     sb.uc_click('button:contains("Continue")')
                     sb.sleep(3)
             
             sb.wait_for_element('input[name="password"]', timeout=15)
-            sb.type('input[name="password"]', password + "\n") # 回车提交
+            sb.type('input[name="password"]', password + "\n")
             sb.sleep(5)
             
-            # 确保登录成功
             print("👉 等待 Dashboard...")
             sb.wait_for_element('a[href*="/server/"]', timeout=30)
             print("✅ 登录成功")
@@ -121,104 +117,95 @@ def run_pella_task(account_line):
             try:
                 page_text = sb.get_text("body")
                 ips = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', page_text)
-                # 过滤无效IP
                 valid_ips = [ip for ip in ips if not ip.startswith("127.") and not ip.startswith("255.") and "0.0.0.0" not in ip]
                 if valid_ips: log["ip"] = valid_ips[0]
                 elif "0.0.0.0" in page_text: log["ip"] = "0.0.0.0"
                 else: log["ip"] = f"ID: {server_id[:6]}..."
             except: pass
 
-            # [B] 判断服务器状态 & 启动逻辑 (核心修改)
-            # 定义更精准的 XPath 选择器
-            # 查找包含文本 "STOP" 的按钮 (不区分大小写，移除空格干扰)
-            stop_btn_xpath = "//button[contains(., 'STOP')]"
-            start_btn_xpath = "//button[contains(., 'START')]"
+            # [B] 判断服务器状态 & 启动逻辑 (最关键部分)
+            # 使用 XPath，不区分大小写
+            stop_xpath = "//button[contains(., 'STOP')]"
+            start_xpath = "//button[contains(., 'START')]"
 
-            if sb.is_element_visible(stop_btn_xpath):
-                print("✅ 检测到 STOP 按钮 -> 状态: 运行中")
+            # 先检查是否有 STOP (红色按钮)，如果有就是运行中
+            if sb.is_element_visible(stop_xpath):
+                print("✅ 状态: 运行中")
                 log["status"] = "运行中"
             
-            elif sb.is_element_visible(start_btn_xpath):
-                print("⚠️ 检测到 START 按钮 -> 状态: 已停止")
+            elif sb.is_element_visible(start_xpath):
+                print("⚠️ 状态: 已停止，准备启动...")
                 log["status"] = "已停止"
                 
                 # --- 执行启动 ---
-                print("👉 尝试点击启动...")
                 try:
-                    # 使用 XPath 点击
-                    sb.click(start_btn_xpath)
-                    log["logs"].append("已点击启动")
+                    # 1. 点击 START
+                    print("👉 点击 START 按钮...")
+                    sb.click(start_xpath)
+                    sb.sleep(2)
                     
-                    # 等待一下看状态是否改变
-                    sb.sleep(5)
-                    if sb.is_element_visible(stop_btn_xpath):
-                         log["status"] = "启动成功 (运行中)"
-                    else:
-                         log["status"] = "启动指令已发送"
+                    # 2. 循环检查是否变更为 STOP (等待启动完成)
+                    print("👉 等待状态变更...")
+                    for i in range(10): # 等待 20秒
+                        if sb.is_element_visible(stop_xpath):
+                            print("✅ 启动成功！")
+                            log["status"] = "运行中"
+                            log["logs"].append("执行了启动操作")
+                            break
+                        sb.sleep(2)
+                    
+                    if log["status"] == "已停止":
+                        log["logs"].append("点击启动但未变绿")
+                        log["status"] = "启动指令已发"
+                        
                 except Exception as e:
-                    print(f"❌ 点击启动失败: {e}")
-                    log["logs"].append("点击启动失败")
-            
+                    print(f"❌ 启动点击失败: {e}")
+                    log["logs"].append("启动失败")
             else:
-                # 兜底：如果找不到文字按钮，尝试找颜色类名 (根据截图推测)
-                print("⚠️ 未找到文字按钮，尝试备用方案...")
-                if sb.is_element_visible("button.bg-red-500") or sb.is_element_visible("button.bg-red-600"):
-                     log["status"] = "运行中 (按颜色判断)"
-                elif sb.is_element_visible("button.bg-green-500") or sb.is_element_visible("button.bg-green-600"):
-                     log["status"] = "已停止"
-                     sb.click("button.bg-green-500") # 盲点绿色按钮
-                     log["logs"].append("已点击启动(颜色识别)")
-                else:
-                    log["status"] = "状态未知"
+                log["status"] = "未知状态"
 
             # [C] 获取到期时间
             try:
-                # 寻找包含 "expires in" 的文本
-                expiry_el = sb.find_element("//*[contains(text(), 'expires in')]")
-                match = re.search(r"expires in\s+([0-9D\sHM]+)", expiry_el.text)
-                if match: log["expiry"] = match.group(1).strip()
-                else: log["expiry"] = "解析失败"
+                # 不用 wait_for，用 find_element
+                if sb.is_element_visible("//*[contains(text(), 'expires in')]"):
+                    expiry_el = sb.find_element("//*[contains(text(), 'expires in')]")
+                    match = re.search(r"expires in\s+([0-9D\sHM]+)", expiry_el.text)
+                    if match: log["expiry"] = match.group(1).strip()
+                    else: log["expiry"] = "解析失败"
+                else:
+                    log["expiry"] = "未找到时间文本"
             except:
-                log["expiry"] = "未找到时间"
+                log["expiry"] = "Error"
 
-            # 设置提示
             if "D" in log["expiry"]: log["hint"] = "剩余 > 24小时"
             else: log["hint"] = "⚠️ 剩余 < 24小时"
 
-            # [D] 续期检测
+            # [D] 续期检测 (修复崩溃点)
             print("👉 检查续期按钮...")
-            # 查找所有包含 "Claim" 的链接或按钮
-            claim_items = sb.find_elements("//*[contains(text(), 'Claim')]")
+            # 绝对不要用 wait_for，因为可能没有按钮
+            # 查找所有 button 元素，然后自己过滤文本
+            all_buttons = sb.find_elements("button")
             
             claimed_cnt = 0
             click_cnt = 0
             
-            # 截图中的 Claim 按钮可能是 button 也可能是 a 标签
-            # 遍历所有包含 Claim 文本的元素
-            processed_elements = [] # 防止重复点击
-            
-            for item in claim_items:
+            for btn in all_buttons:
                 try:
-                    txt = item.text
-                    if item in processed_elements: continue
-                    
-                    # 排除掉说明文字，只点按钮 (通常文字较短)
-                    if len(txt) > 20 and "HOURS" not in txt: continue
-
+                    txt = btn.text
+                    # 你的截图显示已领取的按钮文字是 "Claimed"
                     if "Claimed" in txt:
                         claimed_cnt += 1
-                        processed_elements.append(item)
-                    elif "HOURS" in txt: # 例如 "16 HOURS Claim"
+                    # 未领取的通常包含 "Claim" 且不含 "Claimed"
+                    elif "Claim" in txt and "Claimed" not in txt:
                         print(f"👉 点击续期: {txt}")
-                        item.click()
+                        btn.click()
                         click_cnt += 1
-                        sb.sleep(2)
-                        processed_elements.append(item)
+                        sb.sleep(3)
                 except: pass
 
             if click_cnt > 0: log["renew_status"] = f"成功续期 {click_cnt} 次"
-            elif claimed_cnt > 0: log["renew_status"] = "无需续期 (已Claimed)"
-            else: log["renew_status"] = "未找到可用按钮"
+            elif claimed_cnt > 0: log["renew_status"] = "无需续期"
+            else: log["renew_status"] = "无可用按钮"
 
         except Exception as e:
             print(f"❌ 发生错误: {e}")
@@ -234,14 +221,21 @@ def run_pella_task(account_line):
 def send_report(log, token, chat_id):
     # 构建 Telegram 消息
     header_emoji = "ℹ️"
-    if "启动" in "".join(log["logs"]) or "启动" in log["status"]: header_emoji = "⚠️"
+    # 如果有启动日志，用黄色警告图标
+    if "启动" in "".join(log["logs"]): header_emoji = "⚠️"
+    # 如果刚续期了，用庆祝图标
     if "成功续期" in log["renew_status"]: header_emoji = "🎉"
-    if "出错" in log["status"]: header_emoji = "❌"
+    # 如果出错了，用红叉
+    if "出错" in log["status"] or "Err" in "".join(log["logs"]): header_emoji = "❌"
 
-    # 如果有启动操作，修改标题
-    action_title = log['renew_status']
-    if "启动" in log["logs"] or "启动" in log["status"]:
-         action_title = "执行了启动操作"
+    # 构建标题动作
+    action_text = "无需续期"
+    if "启动" in "".join(log["logs"]):
+        action_text = "执行了启动操作"
+    elif "成功续期" in log["renew_status"]:
+        action_text = log["renew_status"]
+    elif "脚本出错" in log["status"]:
+        action_text = "脚本执行出错"
 
     msg = f"""
 <b>🎮 Pella 续期通知</b>
@@ -249,7 +243,7 @@ def send_report(log, token, chat_id):
 🖥 IP: <code>{log['ip']}</code>
 ⏰ 时间: {get_beijing_time()}
 
-{header_emoji} <b>{action_title}</b>
+{header_emoji} <b>{action_text}</b>
 📊 状态: <b>{log['status']}</b>
 ⏳ 剩余: {log['expiry']}
 💡 提示: {log['hint']}
