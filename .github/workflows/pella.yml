@@ -34,7 +34,14 @@ jobs:
           # 格式: email,password,server_id,tg_token,tg_chat_id
           PELLA_BATCH: ${{ secrets.PELLA_BATCH }}
         run: python main.py
-
+      # 👇👇👇 必须有这段代码，否则截图会被直接删除 👇👇👇
+      - name: 📤 Upload Debug Screenshots
+        if: always()  # 这一点很重要：即使脚本报错崩溃，也要上传截图
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug_screenshots/  # 这里必须和 main.py 里保存的文件夹名字一致
+          retention-days: 3
       # ⏱️ 自动提交防止 Actions 暂停 (抄作业部分)
       - name: Keep Workflow Alive
         env:
